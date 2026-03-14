@@ -699,7 +699,7 @@ function calcCycleStats(cycle) {
 
   // Trigger 2: 7-day trend > +2.0
   if (trajectory !== null && trajectory > 2.0)
-    flushReasons.push(`7d trend +${trajectory.toFixed(1)} (threshold: +2.0)`);
+    flushReasons.push(`7d trend ${trajectory >= 0 ? '+' : ''}${trajectory.toFixed(1)} (threshold: +2.0)`);
 
   // Trigger 3: Avg EC > 7.0
   if (avgEc !== null && avgEc > 7.0)
@@ -792,10 +792,10 @@ function renderRooms(cyclesBySubRoom) {
     const strainHtml = stats.strains.slice(0, 14).map(s => {
       const sens = getStrainSensitivity(s);
       const fullName = resolveStrain(s);
-      const borderColor = sensitivityColor(sens ? sens.score : null);
-      const bgColor = sensitivityBg(sens ? sens.score : null);
-      const scoreLabel = sens ? sens.score.toFixed(1) : '?';
-      const tsLabel = sens ? `${sens.ts}% avg TS · ${sens.n} batches` : 'No harvest data';
+      const borderColor = sensitivityColor((sens && sens.score !== null) ? sens.score : null);
+      const bgColor = sensitivityBg((sens && sens.score !== null) ? sens.score : null);
+      const scoreLabel = (sens && sens.score !== null) ? sens.score.toFixed(1) : '?';
+      const tsLabel = (sens && sens.ts !== null) ? `${sens.ts}% avg TS · ${sens.n} batches` : 'No harvest data';
       return `<span class="strain-tag"
         style="border-color:${borderColor};background:${bgColor}"
         onclick="showStrainTooltip(this)"
@@ -1066,7 +1066,7 @@ function loadData(sheetId) {
     try {
       onDataLoaded(parseGvizResponse(response));
     } catch(e) {
-      console.error('Parse error:', e);
+      console.error('Parse error:', e.message, e.stack);
       setStatus('error', 'Failed to parse sheet data');
       icon.classList.remove('spinning');
     }
