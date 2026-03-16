@@ -292,6 +292,23 @@
   .traj-flat { color: #ffb74d; }
   .traj-down { color: #66bb6a; }
 
+  /* Runoff metrics */
+  .ro-metrics { display: grid; grid-template-columns: repeat(3,1fr); border-top: 1px solid var(--border); }
+  .ro-cell { padding: 8px 12px; border-right: 1px solid var(--border); }
+  .ro-cell:last-child { border-right: none; }
+  .ro-lbl { font-size: 9px; color: var(--text-muted); letter-spacing: 0.07em; text-transform: uppercase; margin-bottom: 2px; }
+  .ro-val { font-size: 15px; font-weight: 500; }
+  .ro-sub { font-size: 9px; color: var(--text-muted); margin-top: 1px; }
+  .ro-alert-banner {
+    display: flex; align-items: flex-start; gap: 10px;
+    background: rgba(91,155,213,0.1); border-top: 1px solid rgba(91,155,213,0.25);
+    border-bottom: 1px solid rgba(91,155,213,0.25);
+    padding: 9px 16px;
+  }
+  .ro-alert-title { font-family: var(--font-display); font-size: 11px; font-weight: 700;
+    color: #7ab8e8; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 2px; }
+  .ro-alert-msg { font-size: 10px; color: rgba(91,155,213,0.75); line-height: 1.5; }
+
   .cycle-day-bar {
     height: 3px; background: var(--surface3); border-radius: 2px;
     margin: 8px 16px 0; overflow: hidden;
@@ -339,6 +356,11 @@
   <div class="flush-summary" id="flushSummary" style="display:none;">
     <div class="flush-summary-title">⚡ Flush Recommended</div>
     <div id="flushSummaryList"></div>
+  </div>
+
+  <div class="flush-summary" id="roAlertSummary" style="display:none;border-color:rgba(91,155,213,0.3);background:rgba(91,155,213,0.06);">
+    <div class="flush-summary-title" style="color:#7ab8e8">💧 Runoff Alert</div>
+    <div id="roAlertList"></div>
   </div>
 
   <div class="section-header">
@@ -707,11 +729,63 @@ function calcCycleStats(cycle) {
 
   const needsFlush = !isStale && flushReasons.length > 0;
 
+  // ── Runoff analysis ──────────────────────────────────────────────────────
+  // ro=0 logged = intentional zero (grower logged it), ro=null = no entry
+  // dryBackDays = intentionally flagged dry-back days (from new form field)
+  const roEntries       = cycle.filter(e => e.ro !== null);  // all logged ro entries
+  const roPositive      = roEntries.filter(e => e.ro > 0);   // actual runoff
+  const roZero          = roEntries.filter(e => e.ro === 0 && !e.dryBack); // zero, not flagged
+  const dryBackFlagged  = roEntries.filter(e => e.dryBack);  // intentional dry-back
+
+  const pctDaysWithRo   = roEntries.length
+    ? Math.round((roPositive.length / roEntries.length) * 100) : null;
+
+  // Days since last positive runoff (excluding dry-back days)
+  const sortedByDate = [...cycle].sort((a, b) => a.date - b.date);
+  let daysSinceRo = null;
+  let consecNoRo  = 0;
+  for (let i = sortedByDate.length - 1; i >= 0; i--) {
+    const e = sortedByDate[i];
+    if (e.dryBack) continue; // skip intentional dry-back
+    if (e.ro !== null && e.ro > 0) {
+      daysSinceRo = daysBetween(e.date, today);
+      break;
+    } else if (e.ro === 0) {
+      consecNoRo++;
+    }
+  }
+
+  // Runoff % trend — split cycle into thirds, compare first vs last
+  const roValsChron = sortedByDate.filter(e => e.ro !== null && !e.dryBack)
+    .map(e => e.ro > 0 ? (e.roPct || 0) : 0);
+  const roPctTrend = (() => {
+    const t = Math.max(1, Math.floor(roValsChron.length / 3));
+    const early  = roValsChron.slice(0, t);
+    const recent = roValsChron.slice(-t);
+    const earlyAvg  = early.length  ? early.reduce((a,b)  => a+b, 0) / early.length  : null;
+    const recentAvg = recent.length ? recent.reduce((a,b) => a+b, 0) / recent.length : null;
+    return earlyAvg !== null && recentAvg !== null ? recentAvg - earlyAvg : null;
+  })();
+
+  // Daily runoff % series for chart
+  const dailyRo = sortedByDate
+    .filter(e => e.ro !== null)
+    .map(e => ({
+      date: e.date,
+      roPct: e.ro > 0 ? (e.roPct || 0) : 0,
+      dryBack: e.dryBack || false
+    }));
+
+  // Alert: 3+ consecutive non-intentional zero-ro days
+  const roAlert = !isStale && consecNoRo >= 3;
+
   return {
     avgEc, avgRo, highEcPct, trajectory, projectedTs, status,
     strains, cycleStart, lastLog, cycleDay, daysStale, isStale,
     ecVals, dailyEc, n: cycle.length,
-    needsFlush, flushReasons, maxConsecutiveRising: maxConsecutive
+    needsFlush, flushReasons, maxConsecutiveRising: maxConsecutive,
+    pctDaysWithRo, daysSinceRo, consecNoRo, dryBackFlagged: dryBackFlagged.length,
+    roPctTrend, dailyRo, roAlert
   };
 }
 
@@ -851,14 +925,46 @@ function renderRooms(cyclesBySubRoom) {
           <div class="metric-num ${stats.projectedTs && stats.projectedTs < 48 ? 'ec-warn' : 'ec-ok'}">${tsStr}</div>
         </div>
       </div>
+      <div class="ro-metrics">
+        <div class="ro-cell">
+          <div class="ro-lbl">Days w/ Runoff</div>
+          <div class="ro-val" style="color:${stats.pctDaysWithRo !== null ? (stats.pctDaysWithRo < 40 ? '#e57373' : stats.pctDaysWithRo < 55 ? '#ffb74d' : '#66bb8a') : 'var(--text-muted)'}">${stats.pctDaysWithRo !== null ? stats.pctDaysWithRo + '%' : '—'}</div>
+          <div class="ro-sub">of logged days</div>
+        </div>
+        <div class="ro-cell">
+          <div class="ro-lbl">Last Runoff</div>
+          <div class="ro-val" style="color:${stats.daysSinceRo !== null ? (stats.daysSinceRo >= 3 ? '#ffb74d' : '#66bb8a') : 'var(--text-muted)'}">${stats.daysSinceRo !== null ? stats.daysSinceRo + 'd ago' : '—'}</div>
+          <div class="ro-sub">${stats.consecNoRo > 0 ? stats.consecNoRo + ' consec. zeros' : 'running ok'}</div>
+        </div>
+        <div class="ro-cell">
+          <div class="ro-lbl">RO% Trend</div>
+          <div class="ro-val" style="color:${stats.roPctTrend !== null ? (stats.roPctTrend < -5 ? '#e57373' : stats.roPctTrend > 3 ? '#66bb8a' : '#ffb74d') : 'var(--text-muted)'}">${stats.roPctTrend !== null ? (stats.roPctTrend >= 0 ? '+' : '') + stats.roPctTrend.toFixed(1) + '%' : '—'}</div>
+          <div class="ro-sub">${stats.dryBackFlagged > 0 ? stats.dryBackFlagged + ' dry-back days' : 'no dry-back logged'}</div>
+        </div>
+      </div>
+      ${stats.roAlert ? `
+      <div class="ro-alert-banner">
+        <span style="font-size:15px;flex-shrink:0">💧</span>
+        <div>
+          <div class="ro-alert-title">No Runoff — ${stats.consecNoRo} Consecutive Days</div>
+          <div class="ro-alert-msg">Plants have not produced runoff for ${stats.consecNoRo} days (excluding intentional dry-backs). Check irrigation schedule, shot size, and substrate moisture. Consider a larger P1 event or additional shot to achieve runoff and prevent salt accumulation.</div>
+        </div>
+      </div>` : ''}
       <div class="chart-section">
         <div class="chart-label">Run-off EC · this cycle (${stats.dailyEc.length} readings)</div>
         <div class="chart-wrap"><canvas id="chart-${room.id}"></canvas></div>
       </div>
+      <div class="chart-section" style="border-top:1px solid var(--border)">
+        <div class="chart-label">Runoff % · this cycle · grey bars = dry-back day</div>
+        <div class="chart-wrap" style="height:90px"><canvas id="chart-ro-${room.id}"></canvas></div>
+      </div>
       <div class="strains-row">${strainHtml}</div>
     `;
     list.appendChild(card);
-    requestAnimationFrame(() => buildChart(room.id, stats.dailyEc, stats.status, stats.isStale));
+    requestAnimationFrame(() => {
+      buildChart(room.id, stats.dailyEc, stats.status, stats.isStale);
+      buildRoChart(room.id, stats.dailyRo);
+    });
   });
 
   document.getElementById('cycleCount').textContent = `${activeCount} rooms active`;
@@ -875,6 +981,36 @@ function renderRooms(cyclesBySubRoom) {
     });
   } else {
     flushSummaryEl.style.display = 'none';
+  }
+
+  // Runoff alerts summary — separate section
+  const roAlertRooms = [];
+  HARVEST_ROOMS.forEach(room => {
+    let allEntries = [];
+    room.subs.forEach(sub => {
+      const entries = cyclesBySubRoom[sub] || [];
+      if (!entries.length) return;
+      const cycles = detectCycles(entries);
+      if (cycles.length) allEntries = allEntries.concat(cycles[cycles.length - 1]);
+    });
+    if (!allEntries.length) return;
+    const s = calcCycleStats(allEntries);
+    if (s.roAlert) roAlertRooms.push({ label: room.label, days: s.consecNoRo });
+  });
+  const roSummaryEl = document.getElementById('roAlertSummary');
+  const roListEl    = document.getElementById('roAlertList');
+  if (roAlertRooms.length > 0 && roSummaryEl) {
+    roSummaryEl.style.display = 'block';
+    roListEl.innerHTML = '';
+    roAlertRooms.forEach(r => {
+      const li = document.createElement('div');
+      li.className = 'flush-summary-item';
+      li.innerHTML = `<span class="flush-sum-room" style="color:#7ab8e8">${r.label}</span>
+        <span class="flush-sum-reasons">No runoff for ${r.days} consecutive days</span>`;
+      roListEl.appendChild(li);
+    });
+  } else if (roSummaryEl) {
+    roSummaryEl.style.display = 'none';
   }
 }
 
@@ -936,6 +1072,58 @@ function buildChart(roomId, dailyEc, status, isStale) {
   });
 }
 
+function buildRoChart(roomId, dailyRo) {
+  const canvas = document.getElementById(`chart-ro-${roomId}`);
+  if (!canvas) return;
+  if (charts[`ro-${roomId}`]) charts[`ro-${roomId}`].destroy();
+
+  const labels = dailyRo.map((_, i) => `${i + 1}`);
+  const data   = dailyRo.map(d => d.roPct);
+  const colors = dailyRo.map(d =>
+    d.dryBack ? 'rgba(255,255,255,0.15)' :
+    d.roPct > 0 ? 'rgba(76,175,118,0.7)' : 'rgba(229,115,115,0.6)'
+  );
+
+  charts[`ro-${roomId}`] = new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        data,
+        backgroundColor: colors,
+        borderWidth: 0,
+        borderRadius: 2
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#222220', titleColor: '#f2f0e8', bodyColor: '#f2f0e8',
+          borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1,
+          callbacks: {
+            label: ctx => {
+              const d = dailyRo[ctx.dataIndex];
+              if (d.dryBack) return 'Intentional dry-back';
+              return `Runoff: ${ctx.parsed.y.toFixed(1)}%`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: { display: false },
+        y: {
+          min: 0, max: 40,
+          grid: { color: 'rgba(255,255,255,0.04)' },
+          ticks: { color: 'rgba(242,240,232,0.3)', font: { size: 9 }, maxTicksLimit: 4 },
+          border: { color: 'transparent' }
+        }
+      }
+    }
+  });
+}
+
 function toggleCard(header) {
   const card = header.closest('.room-card');
   card.classList.toggle('expanded');
@@ -963,11 +1151,17 @@ function processData(rows) {
     const roPct  = (feed && feed > 0 && ro && ro > 0) ? (ro / feed) * 100 : null;
 
     if (!bySubRoom[sub]) bySubRoom[sub] = [];
+    // Parse dry-back flag — new form field "Intentional Dry-Back Day" Yes/No
+    const dryBackRaw = row['Intentional Dry-Back Day'] || row[keys[11]] || '';
+    const dryBack = String(dryBackRaw).toLowerCase().includes('yes');
+    // ro: keep null distinct from 0 — null means no entry, 0 means logged zero
+    const roVal = to_float(row['Run-Off Amount (ml)'] || row[keys[4]]);
     bySubRoom[sub].push({
       date,
-      ec:   (ec && ec > 0 && ec < 20) ? ec : null,
-      roPct: (roPct && roPct > 0 && roPct <= 150) ? roPct : null,
-      strain
+      ec:     (ec && ec > 0 && ec < 20) ? ec : null,
+      ro:     roVal !== null ? Math.max(0, roVal) : null,
+      roPct:  (roPct && roPct > 0 && roPct <= 150) ? roPct : null,
+      strain, dryBack
     });
   });
 
